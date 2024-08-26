@@ -1,0 +1,197 @@
+diff --git a/sdk/android/api/org/webrtc/audio/AudioDeviceModule.java b/sdk/android/api/org/webrtc/audio/AudioDeviceModule.java
+index 5a0bf5c74d..099dd3d412 100644
+--- a/sdk/android/api/org/webrtc/audio/AudioDeviceModule.java
++++ b/sdk/android/api/org/webrtc/audio/AudioDeviceModule.java
+@@ -10,6 +10,8 @@
+ 
+ package org.webrtc.audio;
+ 
++import android.media.projection.MediaProjection;
++
+ /**
+  * This interface is a thin wrapper on top of a native C++ webrtc::AudioDeviceModule (ADM). The
+  * reason for basing it on a native ADM instead of a pure Java interface is that we have two native
+@@ -36,6 +38,10 @@ public interface AudioDeviceModule {
+   /** Control muting/unmuting the microphone. */
+   void setMicrophoneMute(boolean mute);
+ 
++
++  /** Set media projection for the audio record. */
++  void setMediaProjection(MediaProjection mediaProjection);
++
+   /**
+    * Enable or disable built in noise suppressor. Returns true if the enabling was successful,
+    * otherwise false is returned.
+diff --git a/sdk/android/api/org/webrtc/audio/JavaAudioDeviceModule.java b/sdk/android/api/org/webrtc/audio/JavaAudioDeviceModule.java
+index b118843ea0..649f89c23f 100644
+--- a/sdk/android/api/org/webrtc/audio/JavaAudioDeviceModule.java
++++ b/sdk/android/api/org/webrtc/audio/JavaAudioDeviceModule.java
+@@ -19,6 +19,8 @@ import androidx.annotation.RequiresApi;
+ import java.util.concurrent.ScheduledExecutorService;
+ import org.webrtc.JniCommon;
+ import org.webrtc.Logging;
++import android.media.AudioRecord;
++import android.media.projection.MediaProjection;
+ 
+ /**
+  * AudioDeviceModule implemented using android.media.AudioRecord as input and
+@@ -396,6 +398,12 @@ public class JavaAudioDeviceModule implements AudioDeviceModule {
+     }
+   }
+ 
++
++  @Override
++  public void setMediaProjection(MediaProjection mediaProjection){
++    audioInput.setMediaProjection(mediaProjection);
++  }
++
+   @Override
+   public void release() {
+     synchronized (nativeLock) {
+diff --git a/sdk/android/src/java/org/webrtc/audio/WebRtcAudioRecord.java b/sdk/android/src/java/org/webrtc/audio/WebRtcAudioRecord.java
+index cfb651f6cd..8c646b7987 100644
+--- a/sdk/android/src/java/org/webrtc/audio/WebRtcAudioRecord.java
++++ b/sdk/android/src/java/org/webrtc/audio/WebRtcAudioRecord.java
+@@ -12,13 +12,16 @@ package org.webrtc.audio;
+ 
+ import android.annotation.TargetApi;
+ import android.content.Context;
++import android.media.AudioAttributes;
+ import android.media.AudioDeviceInfo;
+ import android.media.AudioFormat;
+ import android.media.AudioManager;
++import android.media.AudioPlaybackCaptureConfiguration;
+ import android.media.AudioRecord;
+ import android.media.AudioRecordingConfiguration;
+ import android.media.AudioTimestamp;
+ import android.media.MediaRecorder.AudioSource;
++import android.media.projection.MediaProjection;
+ import android.os.Build;
+ import android.os.Process;
+ import androidx.annotation.Nullable;
+@@ -79,7 +82,7 @@ class WebRtcAudioRecord {
+   // directly after start.
+   private static final int CHECK_REC_STATUS_DELAY_MS = 100;
+ 
+-  private final Context context;
++  public final Context context;
+   private final AudioManager audioManager;
+   private final int audioSource;
+   private final int audioFormat;
+@@ -91,6 +94,7 @@ class WebRtcAudioRecord {
+   private @Nullable ByteBuffer byteBuffer;
+ 
+   private @Nullable AudioRecord audioRecord;
++  public MediaProjection mediaProjection;
+   private @Nullable AudioRecordThread audioThread;
+   private @Nullable AudioDeviceInfo preferredDevice;
+ 
+@@ -311,7 +315,11 @@ class WebRtcAudioRecord {
+     int bufferSizeInBytes = Math.max(BUFFER_SIZE_FACTOR * minBufferSize, byteBuffer.capacity());
+     Logging.d(TAG, "bufferSizeInBytes: " + bufferSizeInBytes);
+     try {
+-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
++      if(mediaProjection != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q){
++        audioRecord = createAudioRecordOnQOrHigher(
++                audioSource, sampleRate, channelConfig, audioFormat,
++                bufferSizeInBytes,mediaProjection);
++      } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+         // Use the AudioRecord.Builder class on Android M (23) and above.
+         // Throws IllegalArgumentException.
+         audioRecord = createAudioRecordOnMOrHigher(
+@@ -417,6 +425,28 @@ class WebRtcAudioRecord {
+     return true;
+   }
+ 
++  @RequiresApi(api = Build.VERSION_CODES.Q)
++  private AudioRecord createAudioRecordOnQOrHigher(
++          int audioSource, int sampleRate, int channelConfig, int audioFormat, int bufferSizeInBytes, MediaProjection mediaProjection) {
++    Logging.d(TAG, "createAudioRecordOnQOrHigher");
++    AudioPlaybackCaptureConfiguration audioConfig =
++            new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
++                    .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
++                    .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
++                    .addMatchingUsage(AudioAttributes.USAGE_GAME)
++                    .build();
++
++    return new AudioRecord.Builder()
++            .setAudioFormat(new AudioFormat.Builder()
++                    .setEncoding(audioFormat)
++                    .setSampleRate(sampleRate)
++                    .setChannelMask(channelConfig)
++                    .build())
++            .setBufferSizeInBytes(bufferSizeInBytes)
++            .setAudioPlaybackCaptureConfig(audioConfig)
++            .build();
++  }
++
+   @TargetApi(Build.VERSION_CODES.M)
+   private static AudioRecord createAudioRecordOnMOrHigher(
+       int audioSource, int sampleRate, int channelConfig, int audioFormat, int bufferSizeInBytes) {
+@@ -533,6 +563,10 @@ class WebRtcAudioRecord {
+     audioSourceMatchesRecordingSessionRef.set(null);
+   }
+ 
++  public void setMediaProjection(MediaProjection mediaProjection){
++    this.mediaProjection = mediaProjection;
++  }
++
+   private void reportWebRtcAudioRecordInitError(String errorMessage) {
+     Logging.e(TAG, "Init recording error: " + errorMessage);
+     WebRtcAudioUtils.logAudioState(TAG, context, audioManager);
+diff --git a/third_party/jni_zero/__pycache__/common.cpython-311.pyc b/third_party/jni_zero/__pycache__/common.cpython-311.pyc
+new file mode 100644
+index 00000000000..30f68dbe907
+Binary files /dev/null and b/third_party/jni_zero/__pycache__/common.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/__pycache__/java_lang_classes.cpython-311.pyc b/third_party/jni_zero/__pycache__/java_lang_classes.cpython-311.pyc
+new file mode 100644
+index 00000000000..1edb09614d1
+Binary files /dev/null and b/third_party/jni_zero/__pycache__/java_lang_classes.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/__pycache__/java_types.cpython-311.pyc b/third_party/jni_zero/__pycache__/java_types.cpython-311.pyc
+new file mode 100644
+index 00000000000..8be6b5581b3
+Binary files /dev/null and b/third_party/jni_zero/__pycache__/java_types.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/__pycache__/jni_generator.cpython-311.pyc b/third_party/jni_zero/__pycache__/jni_generator.cpython-311.pyc
+new file mode 100644
+index 00000000000..77e23a3e419
+Binary files /dev/null and b/third_party/jni_zero/__pycache__/jni_generator.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/__pycache__/jni_registration_generator.cpython-311.pyc b/third_party/jni_zero/__pycache__/jni_registration_generator.cpython-311.pyc
+new file mode 100644
+index 00000000000..a513bea7952
+Binary files /dev/null and b/third_party/jni_zero/__pycache__/jni_registration_generator.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/__pycache__/parse.cpython-311.pyc b/third_party/jni_zero/__pycache__/parse.cpython-311.pyc
+new file mode 100644
+index 00000000000..03639d39b55
+Binary files /dev/null and b/third_party/jni_zero/__pycache__/parse.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/__pycache__/proxy.cpython-311.pyc b/third_party/jni_zero/__pycache__/proxy.cpython-311.pyc
+new file mode 100644
+index 00000000000..bd8797e6ff0
+Binary files /dev/null and b/third_party/jni_zero/__pycache__/proxy.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/codegen/__pycache__/called_by_native_header.cpython-311.pyc b/third_party/jni_zero/codegen/__pycache__/called_by_native_header.cpython-311.pyc
+new file mode 100644
+index 00000000000..3835a0bb85e
+Binary files /dev/null and b/third_party/jni_zero/codegen/__pycache__/called_by_native_header.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/codegen/__pycache__/convert_type.cpython-311.pyc b/third_party/jni_zero/codegen/__pycache__/convert_type.cpython-311.pyc
+new file mode 100644
+index 00000000000..5836d27b287
+Binary files /dev/null and b/third_party/jni_zero/codegen/__pycache__/convert_type.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/codegen/__pycache__/header_common.cpython-311.pyc b/third_party/jni_zero/codegen/__pycache__/header_common.cpython-311.pyc
+new file mode 100644
+index 00000000000..3c8af06e387
+Binary files /dev/null and b/third_party/jni_zero/codegen/__pycache__/header_common.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/codegen/__pycache__/natives_header.cpython-311.pyc b/third_party/jni_zero/codegen/__pycache__/natives_header.cpython-311.pyc
+new file mode 100644
+index 00000000000..7176d3d1b3c
+Binary files /dev/null and b/third_party/jni_zero/codegen/__pycache__/natives_header.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/codegen/__pycache__/placeholder_gen_jni_java.cpython-311.pyc b/third_party/jni_zero/codegen/__pycache__/placeholder_gen_jni_java.cpython-311.pyc
+new file mode 100644
+index 00000000000..91d464b2280
+Binary files /dev/null and b/third_party/jni_zero/codegen/__pycache__/placeholder_gen_jni_java.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/codegen/__pycache__/placeholder_java_type.cpython-311.pyc b/third_party/jni_zero/codegen/__pycache__/placeholder_java_type.cpython-311.pyc
+new file mode 100644
+index 00000000000..2768e23fd5a
+Binary files /dev/null and b/third_party/jni_zero/codegen/__pycache__/placeholder_java_type.cpython-311.pyc differ
+diff --git a/third_party/jni_zero/codegen/__pycache__/proxy_impl_java.cpython-311.pyc b/third_party/jni_zero/codegen/__pycache__/proxy_impl_java.cpython-311.pyc
+new file mode 100644
+index 00000000000..409631a816a
+Binary files /dev/null and b/third_party/jni_zero/codegen/__pycache__/proxy_impl_java.cpython-311.pyc differ

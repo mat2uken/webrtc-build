@@ -257,6 +257,7 @@ PATCHES = {
         "h265.patch",
         "h265_android.patch",
         "fix_perfetto.patch",
+        "add_support_mediaprojection.patch",
     ],
     "raspberry-pi-os_armv6": [
         "nacl_armv6_2.patch",
